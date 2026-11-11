@@ -11,6 +11,19 @@ import json
 import asyncio
 import threading
 import inspect
+import os
+
+
+def conn_type():
+    return 'Network' if os.environ.get('GPS_CONN_TYPE', '').lower() in ('wifi', 'network') else None
+
+
+def is_admin() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 def emit(obj):
@@ -111,48 +124,50 @@ async def message_loop(loc, mode_name: str):
             emit({'error': str(e)})
 
 
-async def run_userspace_rsd(udid: str | None):
-    from pymobiledevice3.remote.userspace_tunnel import establish_userspace_rsd
+async def run_tunnel_rsd(udid: str | None):
+    """iOS 17+: CoreDeviceProxy tunnel -> RSD -> DVT LocationSimulation.
+    pymobiledevice3 >= 9 needs a TUN adapter, so this requires Administrator on Windows."""
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.remote.remote_service_discovery import RemoteServiceDiscoveryService
+    from pymobiledevice3.remote.tunnel_service import CoreDeviceTunnelProxy
     from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
     from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
 
-    rsd = await establish_userspace_rsd(serial=udid)
+    lockdown = await create_using_usbmux(serial=udid, connection_type=conn_type())
+    proxy = await CoreDeviceTunnelProxy.create(lockdown)
     try:
-        dvt = DvtProvider(rsd)
-        await dvt.connect()
-        try:
-            loc = LocationSimulation(dvt)
-            await loc.connect()
-            try:
-                await message_loop(loc, 'userspace-rsd')
-            finally:
-                try:
-                    await loc.close()
-                except Exception:
-                    pass
-        finally:
-            try:
-                await dvt.close()
-            except Exception:
-                pass
+        async with proxy.start_tcp_tunnel() as tunnel:
+            async with RemoteServiceDiscoveryService((tunnel.address, tunnel.port)) as rsd:
+                async with DvtProvider(rsd) as dvt:
+                    async with LocationSimulation(dvt) as loc:
+                        await message_loop(loc, 'tunnel-rsd')
     finally:
         try:
-            await rsd.close()
+            await proxy.close()
         except Exception:
             pass
 
 
 async def run_lockdown(udid: str | None):
+    """iOS <= 16: DtSimulateLocation through lockdown (create_using_usbmux is async in v9)."""
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.simulate_location import DtSimulateLocation
 
-    lockdown = create_using_usbmux(serial=udid)
+    lockdown = await create_using_usbmux(serial=udid, connection_type=conn_type())
+    try:
+        major = int(str(lockdown.product_version).split('.')[0])
+    except Exception:
+        major = 0
+    if major >= 17:
+        raise RuntimeError(f'iOS {lockdown.product_version} requires the RSD tunnel (lockdown simulation unsupported)')
     loc = DtSimulateLocation(lockdown)
     try:
         await message_loop(loc, 'lockdown')
     finally:
         try:
-            loc.close()
+            r = loc.close()
+            if inspect.isawaitable(r):
+                await r
         except Exception:
             pass
 
@@ -179,17 +194,19 @@ async def main_async():
 
     udid = None if (not target or target.lower() in ('auto', 'none', 'default')) else target
 
-    # Try iOS 17+ Userspace RSD Tunnel first
+    # iOS 17+ first (tunnel -> RSD -> DVT), then iOS <= 16 lockdown fallback
     try:
-        await run_userspace_rsd(udid)
+        await run_tunnel_rsd(udid)
         return
     except Exception as e_rsd:
-        # Fallback to iOS <= 16 Lockdown simulation
         try:
             await run_lockdown(udid)
             return
         except Exception as e_lock:
-            emit({'error': f'Failed connecting to device: RSD={e_rsd} | Lockdown={e_lock}'})
+            hint = ''
+            if sys.platform == 'win32' and not is_admin():
+                hint = ' (iOS 17+ cần chạy app bằng quyền Administrator)'
+            emit({'error': f'Failed connecting to device{hint}: RSD={e_rsd!r} | Lockdown={e_lock!r}'})
             sys.exit(1)
 
 

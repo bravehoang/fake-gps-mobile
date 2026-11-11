@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     scanWifi:          () => ipcRenderer.invoke('scan-wifi'),
     getPython:         () => ipcRenderer.invoke('get-python'),
     openUrl:           (url) => ipcRenderer.invoke('open-url', url),
-    setupTunnel:       (udid) => ipcRenderer.invoke('setup-tunnel', { udid }),
+    setupTunnel:       (udid, connType) => ipcRenderer.invoke('setup-tunnel', { udid, connType }),
     teardownTunnel:    () => ipcRenderer.invoke('teardown-tunnel'),
     getTunnelStatus:   () => ipcRenderer.invoke('get-tunnel-status'),
     minimize:          () => ipcRenderer.send('win-minimize'),

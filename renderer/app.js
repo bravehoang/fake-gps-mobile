@@ -6,6 +6,8 @@ let map, selectedMarker = null;
 let selectedLat = null, selectedLng = null;
 let selectedPlace = '';
 let currentUdid = '';
+let connMode = 'usb'; // 'usb' | 'wifi'
+try { connMode = localStorage.getItem('connMode') === 'wifi' ? 'wifi' : 'usb'; } catch {}
 let lastTeleportedLat = null, lastTeleportedLng = null;
 let history = JSON.parse(localStorage.getItem('bh-gps-history') || '[]');
 let favorites = JSON.parse(localStorage.getItem('bh-gps-favorites') || '[]');
@@ -75,7 +77,7 @@ async function checkWizardRequirements() {
         setWizRow('python', 'err', 'Chưa cài đặt Python hoặc chưa thêm vào PATH.', true);
     }
 
-    // 2. Check pymobiledevice3 (Zero-Admin Userspace Tunnel)
+    // 2. Check pymobiledevice3 (Zero-Admin kết nối)
     const { tool } = await electronAPI.detectTool();
     if (tool && tool.startsWith('pymobiledevice3')) {
         wizPmdOk = true;
@@ -217,13 +219,7 @@ window.wizardSelectDevice = wizardSelectDevice;
 
 function wizardContinue() {
     document.getElementById('wizard').classList.add('hidden');
-    document.getElementById('connecting-page').classList.remove('hidden');
-    document.getElementById('layout').classList.add('hidden');
-
-    setStepState('step-device', '');
-    setStepState('step-tunnel', '');
-    setStepState('step-worker', '');
-
+    revealLayout();
     startFullConnection();
 }
 
@@ -256,7 +252,7 @@ function revealLayout() {
 function markSetupDone() {
     const page = document.getElementById('connecting-page');
     if (!page || page.classList.contains('hidden')) return;
-    document.getElementById('setup-title').textContent = '⚡ Userspace Tunnel sẵn sàng! Bắt đầu sử dụng.';
+    document.getElementById('setup-title').textContent = '⚡ kết nối sẵn sàng! Bắt đầu sử dụng.';
     page.classList.add('fading');
     setTimeout(() => {
         page.classList.add('hidden');
@@ -296,24 +292,18 @@ function startConnectingTimeout(ms = 35000) {
 }
 
 async function startFullConnection() {
-    setStepState('step-device', 'step-active');
+    // Map is already visible; connect to the device in the background.
     const { ok, devices } = await electronAPI.getDevices();
-    if (ok && devices.length > 0) {
-        currentUdid = devices[0].udid;
-        setStepState('step-device', 'step-done');
-        setStepState('step-tunnel', 'step-active');
-        document.getElementById('setup-hint').textContent = 'Khởi tạo Userspace Tunnel (Zero-Admin)...';
-        startConnectingTimeout(35000);
+    const list = ok ? devices.filter(d => (d.connectionType === 'WiFi') === (connMode === 'wifi')) : [];
+    if (list.length > 0) {
+        currentUdid = list[0].udid;
         setupTunnel(currentUdid);
     } else {
-        setStepState('step-device', '');
-        document.getElementById('setup-hint').textContent = 'Không tìm thấy iPhone. Kiểm tra cáp USB và Trust trên máy.';
-        showToast('Vui lòng kết nối iPhone qua USB.', 'info');
-        setTimeout(() => {
-            document.getElementById('connecting-page').classList.add('hidden');
-            showWizard();
-        }, 2000);
+        showToast(connMode === 'wifi'
+            ? 'Chưa thấy iPhone qua WiFi. Xem hướng dẫn ở mục Thiết bị.'
+            : 'Chưa thấy iPhone. Hãy cắm cáp USB và bấm Trust.', 'info');
     }
+    refreshDevices();
 }
 
 // ─── Math & Geodesy Helpers ──────────────────────────────────────────────────
@@ -404,7 +394,10 @@ let googleHybridLayer, googleStreetLayer, osmLayer;
 function initMap() {
     map = L.map('map', {
         zoomControl: false,
-        attributionControl: false
+        attributionControl: false,
+        preferCanvas: true,
+        zoomSnap: 1,
+        fadeAnimation: false
     }).setView([21.0285, 105.8542], 14);
 
     L.control.zoom({ position: 'bottomright' }).addTo(map);
@@ -412,18 +405,27 @@ function initMap() {
     // Google Hybrid: Vệ tinh độ nét cao + lớp phủ đường phố, tên địa điểm tiếng Việt đầy đủ
     googleHybridLayer = L.tileLayer('https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
         subdomains: ['0', '1', '2', '3'],
-        maxZoom: 21
+        maxZoom: 21,
+        keepBuffer: 4,
+        updateWhenIdle: false,
+        updateWhenZooming: false
     });
 
     // Google Street: Bản đồ đường phố Google Maps
     googleStreetLayer = L.tileLayer('https://mt{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
         subdomains: ['0', '1', '2', '3'],
-        maxZoom: 21
+        maxZoom: 21,
+        keepBuffer: 4,
+        updateWhenIdle: false,
+        updateWhenZooming: false
     });
 
     // OpenStreetMap: Bản đồ mã nguồn mở OSM
     osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19
+        maxZoom: 19,
+        keepBuffer: 4,
+        updateWhenIdle: false,
+        updateWhenZooming: false
     });
 
     // Mặc định dùng Google Hybrid (Vệ tinh có tên đường & địa danh)
@@ -891,13 +893,17 @@ async function refreshDevices() {
     const dot = document.getElementById('device-dot');
     const label = document.getElementById('device-label');
     const sel = document.getElementById('device-select');
-    const { ok, devices } = await electronAPI.getDevices();
+    const res = await electronAPI.getDevices();
+    const ok = res.ok;
+    const devices = ok ? res.devices.filter(d => (d.connectionType === 'WiFi') === (connMode === 'wifi')) : [];
 
     if (!ok || !devices.length) {
         dot.className = 'status-dot dot-error';
         label.textContent = 'Chưa thấy iPhone';
         sel.classList.add('hidden');
-        document.getElementById('device-cards').innerHTML = '<div class="device-empty">Chưa kết nối thiết bị nào qua USB</div>';
+        document.getElementById('device-cards').innerHTML = connMode === 'wifi'
+            ? '<div class="device-empty">Chưa thấy thiết bị nào qua WiFi</div>'
+            : '<div class="device-empty">Chưa kết nối thiết bị nào qua cáp USB</div>';
         return;
     }
 
@@ -946,7 +952,7 @@ async function setupTunnel(udid) {
     tunnelStatus.status = 'connecting';
     updateTunnelBadge();
 
-    const result = await electronAPI.setupTunnel(udid);
+    const result = await electronAPI.setupTunnel(udid, connMode);
     if (!result.ok) {
         tunnelStatus.status = 'error';
         tunnelStatus.error = result.error || 'Lỗi kết nối';
@@ -959,10 +965,10 @@ function updateTunnelBadge() {
     if (!b) return;
     if (tunnelStatus.status === 'ready' || workerReady) {
         b.className = 'tunnel-badge tunnel-ready';
-        b.textContent = '● Userspace Tunnel sẵn sàng ⚡';
+        b.textContent = '● kết nối sẵn sàng ⚡';
     } else if (tunnelStatus.status === 'connecting') {
         b.className = 'tunnel-badge tunnel-connecting';
-        b.textContent = '◌ Đang kết nối Userspace Tunnel...';
+        b.textContent = '◌ Đang kết nối kết nối...';
     } else if (tunnelStatus.status === 'error') {
         b.className = 'tunnel-badge tunnel-error';
         b.textContent = '✕ Lỗi kết nối tunnel';
@@ -983,7 +989,7 @@ electronAPI.onWorkerReady(() => {
     setStepState('step-worker', 'step-done');
     markSetupDone();
     updateTunnelBadge();
-    showToast('⚡ Userspace Tunnel đã kết nối!', 'success');
+    showToast('⚡ iPhone đã kết nối!', 'success');
 });
 
 // ─── Teleport Action ─────────────────────────────────────────────────────────
@@ -1355,6 +1361,28 @@ document.getElementById('btn-max').onclick   = () => electronAPI.maximize();
 document.getElementById('btn-close').onclick = () => electronAPI.close();
 document.getElementById('btn-refresh').onclick = refreshDevices;
 
+// ─── Connection mode switch (USB / WiFi) ─────────────────────────────────────
+function applyConnModeUI() {
+    document.querySelectorAll('.conn-opt').forEach(b => b.classList.toggle('active', b.dataset.conn === connMode));
+    const hint = document.getElementById('conn-hint');
+    if (hint) hint.classList.toggle('hidden', connMode !== 'wifi');
+}
+async function setConnMode(mode) {
+    if (mode === connMode) return;
+    connMode = mode;
+    try { localStorage.setItem('connMode', mode); } catch {}
+    applyConnModeUI();
+    await electronAPI.teardownTunnel();
+    workerReady = false;
+    tunnelStatus = { status: 'idle' };
+    currentUdid = '';
+    updateTunnelBadge();
+    showToast(mode === 'wifi' ? '📶 Chế độ WiFi' : '🔌 Chế độ cáp USB', 'info');
+    refreshDevices();
+}
+document.querySelectorAll('.conn-opt').forEach(b => { b.onclick = () => setConnMode(b.dataset.conn); });
+applyConnModeUI();
+
 // ─── Wi-Fi Modal ─────────────────────────────────────────────────────────────
 function closeWifiModal() { document.getElementById('wifi-modal').classList.add('hidden'); }
 async function scanWifi() {
@@ -1416,7 +1444,7 @@ async function init() {
     } else {
         document.getElementById('wizard').classList.add('hidden');
         document.getElementById('wizard').classList.add('hidden-by-user');
-        document.getElementById('connecting-page').classList.remove('hidden');
+        revealLayout();
         startFullConnection();
     }
 

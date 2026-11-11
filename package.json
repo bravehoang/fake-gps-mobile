@@ -1,6 +1,6 @@
 {
   "name": "ios-gps-by-bravehoang",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "IOS GPS Location by BraveHoang",
   "main": "main.js",
   "scripts": {
@@ -66,5 +66,8 @@
       "perMachine": false,
       "createDesktopShortcut": true
     }
+  },
+  "dependencies": {
+    "leaflet": "^1.9.4"
   }
 }

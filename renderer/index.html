@@ -5,9 +5,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>iOS GPS Pro by BraveHoang</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://mt0.google.com">
+    <link rel="preconnect" href="https://mt1.google.com">
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
     <link rel="stylesheet" href="style.css">
 </head>
 
@@ -16,7 +16,7 @@
     <div id="titlebar">
         <div id="titlebar-left">
             <div id="app-icon">📍</div>
-            <span id="app-title">iOS GPS Pro <span class="badge-zero-admin">v1.0.3 • Zero-Admin</span></span>
+            <span id="app-title">iOS GPS Pro <span class="badge-zero-admin">v1.0.4</span></span>
         </div>
         <div id="titlebar-drag"></div>
         <div id="titlebar-controls">
@@ -156,6 +156,14 @@
                         <button id="btn-refresh" class="icon-btn" title="Làm mới thiết bị">↻</button>
                     </div>
                 </div>
+                <!-- Connection mode: USB cable / WiFi -->
+                <div id="conn-switch" class="conn-switch">
+                    <button class="conn-opt active" data-conn="usb" type="button">🔌 Cáp USB</button>
+                    <button class="conn-opt" data-conn="wifi" type="button">📶 WiFi</button>
+                </div>
+                <div id="conn-hint" class="conn-hint hidden">
+                    iPhone và máy tính cùng mạng WiFi. Cắm cáp 1 lần, bật <strong>Hiện iPhone này khi có Wi-Fi</strong> trong iTunes/Finder (Sync qua Wi-Fi), rồi bấm ↻.
+                </div>
                 <div id="device-status" class="status-row">
                     <div class="status-dot dot-waiting" id="device-dot"></div>
                     <span id="device-label">Đang tìm thiết bị...</span>
@@ -164,7 +172,7 @@
                 <select id="device-select" class="select-box hidden">
                     <option value="">-- Chọn thiết bị --</option>
                 </select>
-                <div id="tunnel-badge" class="tunnel-badge tunnel-idle">○ Userspace Tunnel sẵn sàng</div>
+                <div id="tunnel-badge" class="tunnel-badge tunnel-idle">○ Chưa kết nối</div>
 
                 <!-- Reset location button -->
                 <button id="btn-reset-gps" class="btn-reset-gps" title="Khôi phục lại định vị GPS thực tế">
@@ -425,7 +433,7 @@
         </div>
     </div>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="vendor/leaflet/leaflet.js"></script>
     <script src="app.js"></script>
 </body>
 

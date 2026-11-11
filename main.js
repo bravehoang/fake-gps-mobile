@@ -42,7 +42,9 @@ function parseExecError(err) {
 
 // Zero-Admin: Modern pymobiledevice3 userspace tunnel needs 0 elevated privileges
 async function isWindowsAdmin() {
-    return true;
+    if (process.platform !== 'win32') return process.getuid ? process.getuid() === 0 : true;
+    try { await execAsync('net session', { timeout: 3000, windowsHide: true }); return true; }
+    catch { return false; }
 }
 
 let mainWindow;
@@ -53,6 +55,7 @@ let pTunnel = {
     host: 'userspace',
     port: 0,
     udid: null,
+    connType: 'usb',
     py: null,
     status: 'idle', // 'idle' | 'connecting' | 'ready' | 'error'
     error: null,
@@ -125,7 +128,10 @@ function startLocationWorker(py, target, port) {
     logDebug(`Starting worker: ${py} ${args.join(' ')}`);
 
     return new Promise((resolve) => {
-        const proc = spawn(py, args, { windowsHide: true });
+        const proc = spawn(py, args, {
+            windowsHide: true,
+            env: { ...process.env, GPS_CONN_TYPE: pTunnel.connType || 'usb', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
+        });
         lWorker.proc = proc;
         let resolved = false;
 
@@ -265,7 +271,11 @@ function teardownPTunnel() {
     logDebug('Persistent tunnel torn down.');
 }
 
-async function setupPersistentTunnel(py, udid) {
+async function setupPersistentTunnel(py, udid, connType) {
+    lWorker.failCount = 0;
+    const wantConn = connType || pTunnel.connType || 'usb';
+    if (wantConn !== pTunnel.connType) teardownLocationWorker();
+    pTunnel.connType = wantConn;
     if (lWorker.status === 'ready' && lWorker.proc && !lWorker.proc.killed && (!udid || lWorker.udid === udid)) {
         logDebug('Reusing existing ready userspace worker');
         return { ok: true, host: 'userspace', port: 0, reused: true };
@@ -340,7 +350,23 @@ function createWindow() {
     });
 }
 
+// iOS 17+ needs a TUN adapter (pymobiledevice3 >= 9) => relaunch elevated on Windows.
+async function relaunchAsAdminIfNeeded() {
+    if (process.platform !== 'win32' || !app.isPackaged || process.argv.includes('--elevated')) return false;
+    if (await isWindowsAdmin()) return false;
+    try {
+        const exe = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+        const ps = `Start-Process -FilePath '${exe.replace(/'/g, "''")}' -ArgumentList '--elevated' -Verb RunAs`;
+        await execAsync(`powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`, { timeout: 60000, windowsHide: true });
+        return true;
+    } catch (e) {
+        logDebug(`Elevation declined/failed: ${e.message}`);
+        return false;
+    }
+}
+
 app.whenReady().then(async () => {
+    if (await relaunchAsAdminIfNeeded()) { app.quit(); return; }
     createWindow();
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -441,11 +467,12 @@ async function installTool(win) {
 // ─── Device Detection ──────────────────────────────────────────────────────
 async function getDevices() {
     const devices = [];
-    const seenUdids = new Set();
+    const seenKeys = new Set();
     const pushUniqueDevice = (device) => {
         const udid = String(device?.udid || '').trim();
-        if (!udid || seenUdids.has(udid)) return;
-        seenUdids.add(udid);
+        const key = `${udid}|${device?.connectionType || 'USB'}`;
+        if (!udid || seenKeys.has(key)) return;
+        seenKeys.add(key);
         devices.push({ ...device, udid });
     };
 
@@ -504,6 +531,8 @@ async function setLocation(lat, lng, udid) {
         try {
             const res = await setLocationViaWorker(lat, lng);
             if (res.ok) return { ok: true, method: 'worker', output: '' };
+            logDebug(`Worker set failed: ${res.error}`);
+            return { ok: false, error: res.error || 'Worker không đặt được vị trí' };
         } catch (e) {
             logDebug(`Worker send error: ${e.message}`);
         }
@@ -515,9 +544,15 @@ async function setLocation(lat, lng, udid) {
         try {
             const res = await setLocationViaWorker(lat, lng);
             if (res.ok) return { ok: true, method: 'worker', output: '' };
+            return { ok: false, error: res.error || 'Worker không đặt được vị trí' };
         } catch (e) {
             return { ok: false, error: e.message };
         }
+    }
+    if (!tunnelRes.ok) {
+        const adminHint = process.platform === 'win32' && !(await isWindowsAdmin())
+            ? ' Hãy chạy app bằng quyền Administrator (iOS 17+ cần tạo tunnel).' : '';
+        return { ok: false, error: `${tunnelRes.error || 'Không kết nối được iPhone'}${adminHint}` };
     }
 
     // 3. Fallback to CLI command
@@ -559,7 +594,7 @@ async function resetLocation(udid) {
 }
 
 // ─── IPC Handlers ──────────────────────────────────────────────────────────
-ipcMain.handle('check-admin', async () => true);
+ipcMain.handle('check-admin', async () => isWindowsAdmin());
 
 ipcMain.handle('get-iphone-location', async () => {
     try {
@@ -666,11 +701,11 @@ ipcMain.handle('open-url', async (_, url) => {
     await shell.openExternal(url);
 });
 
-ipcMain.handle('setup-tunnel', async (_, { udid }) => {
+ipcMain.handle('setup-tunnel', async (_, { udid, connType }) => {
     try {
         const py = await getPythonCmd();
         if (!py) return { ok: false, error: 'Không tìm thấy Python.' };
-        return await setupPersistentTunnel(py, udid);
+        return await setupPersistentTunnel(py, udid, connType);
     } catch (e) {
         return { ok: false, error: e.message };
     }
