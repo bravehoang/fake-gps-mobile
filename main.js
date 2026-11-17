@@ -291,7 +291,20 @@ async function setupPersistentTunnel(py, udid, connType) {
 
     // 1. Direct Userspace Worker connection (NO ADMIN REQUIRED!)
     const targetUdid = (udid && udid !== 'auto') ? udid : '';
-    const res = await startLocationWorker(py, targetUdid);
+    let res = await startLocationWorker(py, targetUdid);
+    if (!res.ok && String(res.error || '').includes('NEED_UPGRADE')) {
+        // Old pymobiledevice3 (<10) cannot make an admin-free tunnel: upgrade it once, then retry.
+        logDebug('pymobiledevice3 too old, upgrading...');
+        if (mainWindow && !mainWindow.isDestroyed())
+            mainWindow.webContents.send('install-python-progress', 'Đang nâng cấp pymobiledevice3...\n');
+        try {
+            await execAsync(`"${py}" -m pip install --upgrade pymobiledevice3`, { timeout: 480000, windowsHide: true });
+            lWorker.failCount = 0;
+            res = await startLocationWorker(py, targetUdid);
+        } catch (e) {
+            res = { ok: false, error: `Không nâng cấp được pymobiledevice3: ${e.message}` };
+        }
+    }
     if (res.ok) {
         pTunnel.status = 'ready';
         pTunnel.host = 'userspace';
@@ -465,6 +478,16 @@ async function installTool(win) {
 }
 
 // ─── Device Detection ──────────────────────────────────────────────────────
+// Auto-enable "Sync over Wi-Fi" while the phone is on USB so usbmuxd can see it over WiFi later.
+const wifiSyncDone = new Set();
+function enableWifiSyncOnce(py, udid) {
+    if (wifiSyncDone.has(udid)) return;
+    wifiSyncDone.add(udid);
+    execAsync(`"${py}" -m pymobiledevice3 --no-color lockdown wifi-connections --state on --udid ${udid}`, { timeout: 15000 })
+        .then(() => logDebug(`WiFi sync enabled for ${udid}`))
+        .catch(e => { wifiSyncDone.delete(udid); logDebug(`enable wifi sync failed: ${e.message}`); });
+}
+
 async function getDevices() {
     const devices = [];
     const seenKeys = new Set();
@@ -481,7 +504,7 @@ async function getDevices() {
         const py = await getPythonCmd();
         if (py) {
             try {
-                const { stdout } = await execAsync(`"${py}" -m pymobiledevice3 --no-color usbmux list`, { timeout: 8000 });
+                const { stdout } = await execAsync(`"${py}" -m pymobiledevice3 --no-color usbmux list`, { timeout: 20000 });
                 const raw = normalizeCliText(stdout || '').trim();
                 const jsonStart = raw.indexOf('[');
                 if (jsonStart !== -1) {
@@ -495,6 +518,7 @@ async function getDevices() {
                             const model = item?.ProductType || '';
                             const version = item?.ProductVersion || '';
                             pushUniqueDevice({ udid, name, connectionType: connType, model, version, source: 'pymobiledevice3' });
+                            if (connType === 'USB') enableWifiSyncOnce(py, udid);
                         }
                     }
                 }
@@ -531,15 +555,16 @@ async function setLocation(lat, lng, udid) {
         try {
             const res = await setLocationViaWorker(lat, lng);
             if (res.ok) return { ok: true, method: 'worker', output: '' };
-            logDebug(`Worker set failed: ${res.error}`);
-            return { ok: false, error: res.error || 'Worker không đặt được vị trí' };
+            logDebug(`Worker set failed: ${res.error} -> reconnecting`);
         } catch (e) {
-            logDebug(`Worker send error: ${e.message}`);
+            logDebug(`Worker send error: ${e.message} -> reconnecting`);
         }
+        // Link is dead (cable pulled / WiFi lost / mode switched): rebuild it below.
+        teardownPTunnel();
     }
 
     // 2. Connect worker and retry
-    const tunnelRes = await setupPersistentTunnel(py, udid);
+    const tunnelRes = await setupPersistentTunnel(py, udid || pTunnel.udid);
     if (tunnelRes.ok && lWorker.status === 'ready') {
         try {
             const res = await setLocationViaWorker(lat, lng);

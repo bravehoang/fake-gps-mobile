@@ -14,6 +14,9 @@ import inspect
 import os
 
 
+WAS_READY = False
+
+
 def conn_type():
     return 'Network' if os.environ.get('GPS_CONN_TYPE', '').lower() in ('wifi', 'network') else None
 
@@ -50,6 +53,8 @@ async def do_clear(loc):
 
 
 async def message_loop(loc, mode_name: str):
+    global WAS_READY
+    WAS_READY = True
     emit({'status': 'ready', 'mode': mode_name})
 
     loop = asyncio.get_event_loop()
@@ -118,10 +123,58 @@ async def message_loop(loc, mode_name: str):
             lat_s, lng_s = cmd.split(',', 1)
             lat = float(lat_s.strip())
             lng = float(lng_s.strip())
-            await do_set(loc, lat, lng)
+        except Exception as e:
+            emit({'error': f'Bad command: {e}'})
+            continue
+        try:
+            await asyncio.wait_for(do_set(loc, lat, lng), timeout=5.0)
             emit({'ok': True, 'lat': lat, 'lng': lng})
         except Exception as e:
-            emit({'error': str(e)})
+            # Device link is most likely gone (cable pulled / WiFi lost): report and exit so the app reconnects.
+            emit({'error': f'Set location failed: {e!r}', 'fatal': True})
+            sys.exit(2)
+
+
+async def run_userspace_rsd(udid: str | None):
+    """iOS 17+ WITHOUT admin (pymobiledevice3 >= 10): in-process PyTCP tunnel.
+    Honors USB vs WiFi (usbmux 'Network') and falls back to RemotePairing over Bonjour on WiFi."""
+    try:
+        from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel, TunnelProvider
+    except ImportError:
+        raise RuntimeError('NEED_UPGRADE: pymobiledevice3 qua cu (can >= 10), chay: pip install -U pymobiledevice3')
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.remote import tunnel_service
+    from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
+    from pymobiledevice3.services.dvt.instruments.location_simulation import LocationSimulation
+
+    ctype = conn_type()
+
+    async def provider_factory():
+        last_err = None
+        lockdown = None
+        try:
+            lockdown = await create_using_usbmux(serial=udid, connection_type=ctype, autopair=True)
+            return TunnelProvider(await tunnel_service.CoreDeviceTunnelProxy.create(lockdown), lockdown)
+        except Exception as e:
+            last_err = e
+            if lockdown is not None:
+                try:
+                    await lockdown.close()
+                except Exception:
+                    pass
+        # WiFi fallback: RemotePairing over Bonjour (needs the phone awake on the same network)
+        try:
+            services = await tunnel_service.get_remote_pairing_tunnel_services(udid=udid, first_address_only=True)
+        except Exception:
+            services = []
+        if services:
+            return TunnelProvider(services[0])
+        raise last_err or RuntimeError('Khong tim thay iPhone qua WiFi')
+
+    async with UserspaceRsdTunnel(serial=udid, provider_factory=provider_factory) as rsd:
+        async with DvtProvider(rsd) as dvt:
+            async with LocationSimulation(dvt) as loc:
+                await message_loop(loc, 'userspace-rsd')
 
 
 async def run_tunnel_rsd(udid: str | None):
@@ -195,6 +248,20 @@ async def main_async():
     udid = None if (not target or target.lower() in ('auto', 'none', 'default')) else target
 
     # iOS 17+ first (tunnel -> RSD -> DVT), then iOS <= 16 lockdown fallback
+    e_user = None
+    try:
+        await run_userspace_rsd(udid)
+        return
+    except Exception as e:
+        e_user = e
+        if WAS_READY:
+            # Connection dropped after it was working (cable pulled / WiFi lost): exit so the app reconnects.
+            emit({'error': f'Mất kết nối iPhone: {e!r}'})
+            sys.exit(1)
+        if 'NEED_UPGRADE' in str(e):
+            emit({'error': str(e), 'need_upgrade': True})
+            sys.exit(1)
+
     try:
         await run_tunnel_rsd(udid)
         return
@@ -206,7 +273,7 @@ async def main_async():
             hint = ''
             if sys.platform == 'win32' and not is_admin():
                 hint = ' (iOS 17+ cần chạy app bằng quyền Administrator)'
-            emit({'error': f'Failed connecting to device{hint}: RSD={e_rsd!r} | Lockdown={e_lock!r}'})
+            emit({'error': f'Failed connecting to device{hint}: Userspace={e_user!r} | RSD={e_rsd!r} | Lockdown={e_lock!r}'})
             sys.exit(1)
 
 
